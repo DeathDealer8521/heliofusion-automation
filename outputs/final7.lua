@@ -7,7 +7,12 @@ local PULSE_SIDE   = 0
 
 local IDLE_POLL_SECONDS = 1
 local INPUT_STABLE_SECONDS = 5
-local FLUSH_PULSE_SECONDS = 5
+local FLUSH_POLL_SECONDS = 1
+local FLUSH_CLEAR_STABLE_POLLS = 2
+local FLUSH_ALERT_SECONDS = 60
+
+local DISCORD_WEBHOOK_CONFIG = "/home/discord_webhook.lua"
+local DISCORD_ALERT_MESSAGE = "@everyone quark is currently broken please fix"
 
 local PLASMA_RETRY_SECONDS          = 30
 local RETRIES_BEFORE_CRAFT_CANCEL  = 30
@@ -342,18 +347,131 @@ local function getInputSignature(items, fluids)
   return table.concat(parts, "|"), #keys > 0
 end
 
+local function jsonEscape(value)
+  return tostring(value)
+    :gsub("\\", "\\\\")
+    :gsub('"', '\\"')
+    :gsub("\r", "\\r")
+    :gsub("\n", "\\n")
+    :gsub("\t", "\\t")
+end
+
+local function loadDiscordWebhookUrl()
+  local ok, urlOrError = pcall(dofile, DISCORD_WEBHOOK_CONFIG)
+  if not ok then
+    return nil, "could not load " .. DISCORD_WEBHOOK_CONFIG .. ": " .. tostring(urlOrError)
+  end
+
+  if type(urlOrError) ~= "string"
+      or not urlOrError:match("^https://discord%.com/api/webhooks/") then
+    return nil, DISCORD_WEBHOOK_CONFIG .. " did not return a valid Discord webhook URL"
+  end
+
+  return urlOrError
+end
+
+local function sendDiscordAlert()
+  local webhookUrl, configError = loadDiscordWebhookUrl()
+  if not webhookUrl then
+    print("  Discord alert not sent: " .. tostring(configError))
+    return false
+  end
+
+  if not component.isAvailable("internet") then
+    print("  Discord alert not sent: no Internet Card is available.")
+    return false
+  end
+
+  local internetOk, internetOrError = pcall(require, "internet")
+  if not internetOk then
+    print("  Discord alert not sent: " .. tostring(internetOrError))
+    return false
+  end
+
+  local payload = string.format(
+    '{"content":"%s","allowed_mentions":{"parse":["everyone"]}}',
+    jsonEscape(DISCORD_ALERT_MESSAGE)
+  )
+  local separator = webhookUrl:find("?", 1, true) and "&" or "?"
+  local requestUrl = webhookUrl .. separator .. "wait=true"
+
+  local requestOk, responseOrError = pcall(
+    internetOrError.request,
+    requestUrl,
+    payload,
+    { ["Content-Type"] = "application/json" },
+    "POST"
+  )
+  if not requestOk then
+    print("  Discord alert request failed: " .. tostring(responseOrError))
+    return false
+  end
+
+  local responseOk, responseError = pcall(function()
+    for _ in responseOrError do
+      -- Consume the response so OpenComputers completes the HTTP request.
+    end
+  end)
+  if not responseOk then
+    print("  Discord alert response failed: " .. tostring(responseError))
+    return false
+  end
+
+  print("  Discord alert sent.")
+  return true
+end
+
 local function flushInputs()
-  print(string.format("\n=== Flush pulse (%ds) ===", FLUSH_PULSE_SECONDS))
+  print("\n=== Flushing recipe inputs until the storage ME is clear ===")
   redstone.setOutput(PULSE_SIDE, 15)
 
-  local ok, sleepError = pcall(os.sleep, FLUSH_PULSE_SECONDS)
+  local ok, flushError = pcall(function()
+    local elapsed = 0
+    local clearPolls = 0
+    local alertAttempted = false
+
+    while true do
+      os.sleep(FLUSH_POLL_SECONDS)
+      elapsed = elapsed + FLUSH_POLL_SECONDS
+
+      local currentItems = storageME.getItemsInNetwork()
+      local currentFluids = storageME.getFluidsInNetwork()
+      local _, hasInputs = getInputSignature(currentItems, currentFluids)
+
+      if hasInputs then
+        clearPolls = 0
+      else
+        clearPolls = clearPolls + 1
+        print(string.format(
+          "  No dust or non-plasma fluids detected (%d/%d).",
+          clearPolls,
+          FLUSH_CLEAR_STABLE_POLLS
+        ))
+
+        if clearPolls >= FLUSH_CLEAR_STABLE_POLLS then
+          return
+        end
+      end
+
+      if not alertAttempted and elapsed > FLUSH_ALERT_SECONDS then
+        alertAttempted = true
+        print(string.format(
+          "  Flush has exceeded %d seconds; sending Discord alert.",
+          FLUSH_ALERT_SECONDS
+        ))
+        sendDiscordAlert()
+      end
+    end
+  end)
+
+  -- Never leave the flush signal enabled if the loop or ME query fails.
   redstone.setOutput(PULSE_SIDE, 0)
 
   if not ok then
-    error("Flush pulse failed: " .. tostring(sleepError))
+    error("Flush loop failed: " .. tostring(flushError))
   end
 
-  print("  Flush pulse complete; output turned off.")
+  print("  Recipe inputs are clear; flush output turned off.")
 end
 
 local function waitForStableInputSnapshot()

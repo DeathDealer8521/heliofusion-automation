@@ -1,0 +1,2 @@
+# Never commit a real Discord webhook token.
+outputs/discord_webhook.lua

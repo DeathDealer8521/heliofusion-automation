@@ -1,0 +1,5 @@
+-- Copy this file to /home/discord_webhook.lua on the OpenComputers machine.
+-- Replace the placeholder with a newly rotated Discord webhook URL.
+-- Keep the real URL out of Git because it grants permission to post messages.
+
+return "PASTE_NEW_DISCORD_WEBHOOK_URL_HERE"
