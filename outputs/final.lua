@@ -1,4 +1,7 @@
 local component = require("component")
+local SCRIPT_VERSION = "1.1.0"
+
+print("Heliofusion Exoticizer automation v" .. SCRIPT_VERSION)
 
 ------------------------------------------------
 -- CONFIG
@@ -766,6 +769,18 @@ end
 print("Storage ME controller:  " .. storageAddr)
 print("Crafting ME controller: " .. craftingAddr)
 print("Automatic mode enabled; no input trigger is required.")
+
+local startupWebhookUrl, startupWebhookError = loadDiscordWebhookUrl()
+if not startupWebhookUrl then
+  print("Discord alert status: CONFIG ERROR - " .. tostring(startupWebhookError))
+elseif not component.isAvailable("internet") then
+  print("Discord alert status: NO INTERNET CARD")
+else
+  print(string.format(
+    "Discord alert status: ready (%d-second plasma-watch timeout)",
+    PLASMA_CRAFT_ALERT_SECONDS
+  ))
+end
 
 while true do
   waitForClean()
