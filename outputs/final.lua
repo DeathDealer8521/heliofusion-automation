@@ -8,12 +8,12 @@ local PULSE_SIDE   = 0
 local IDLE_POLL_SECONDS = 1
 local FLUSH_POLL_SECONDS = 1
 local FLUSH_CLEAR_STABLE_POLLS = 2
-local FLUSH_ALERT_SECONDS = 60
 
 local DISCORD_WEBHOOK_CONFIG = "/home/discord_webhook.lua"
 local DISCORD_ALERT_MESSAGE = "@everyone quark is currently broken please fix"
 
 local PLASMA_RETRY_SECONDS          = 30
+local PLASMA_CRAFT_ALERT_SECONDS    = 60
 local RETRIES_BEFORE_CRAFT_CANCEL  = 30
 local CRAFT_CANCEL_SETTLE_SECONDS  = 2
 local PLASMA_WATCH_POLL_SECONDS     = 1
@@ -425,13 +425,10 @@ local function flushInputs()
   redstone.setOutput(PULSE_SIDE, 15)
 
   local ok, flushError = pcall(function()
-    local elapsed = 0
     local clearPolls = 0
-    local alertAttempted = false
 
     while true do
       os.sleep(FLUSH_POLL_SECONDS)
-      elapsed = elapsed + FLUSH_POLL_SECONDS
 
       local currentItems = storageME.getItemsInNetwork()
       local currentFluids = storageME.getFluidsInNetwork()
@@ -450,15 +447,6 @@ local function flushInputs()
         if clearPolls >= FLUSH_CLEAR_STABLE_POLLS then
           return
         end
-      end
-
-      if not alertAttempted and elapsed > FLUSH_ALERT_SECONDS then
-        alertAttempted = true
-        print(string.format(
-          "  Flush has exceeded %d seconds; sending Discord alert.",
-          FLUSH_ALERT_SECONDS
-        ))
-        sendDiscordAlert()
       end
     end
   end)
@@ -528,6 +516,8 @@ local function waitForRequestedWork(jobs)
 
   print("\nWatching requested plasma jobs...")
   local stableClear = 0
+  local elapsed = 0
+  local alertAttempted = false
 
   while true do
     local plasmaFluids = getPlasmaFluids()
@@ -612,9 +602,19 @@ local function waitForRequestedWork(jobs)
       end
     else
       stableClear = 0
+
+      if not alertAttempted and elapsed >= PLASMA_CRAFT_ALERT_SECONDS then
+        alertAttempted = true
+        print(string.format(
+          "  Plasma crafting still has unresolved jobs after %d seconds; sending Discord alert.",
+          PLASMA_CRAFT_ALERT_SECONDS
+        ))
+        sendDiscordAlert()
+      end
     end
 
     os.sleep(PLASMA_WATCH_POLL_SECONDS)
+    elapsed = elapsed + PLASMA_WATCH_POLL_SECONDS
   end
 end
 
