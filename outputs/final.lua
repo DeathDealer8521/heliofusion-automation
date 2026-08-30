@@ -1,7 +1,9 @@
 local component = require("component")
-local SCRIPT_VERSION = "1.1.0"
+local SCRIPT_VERSION = "1.2.0"
+local SCRIPT_VERSION_REASON = "Use the next Exoticizer input batch as the recipe-completion signal"
 
 print("Heliofusion Exoticizer automation v" .. SCRIPT_VERSION)
+print("Version reason: " .. SCRIPT_VERSION_REASON)
 
 ------------------------------------------------
 -- CONFIG
@@ -20,7 +22,6 @@ local PLASMA_CRAFT_ALERT_SECONDS    = 60
 local RETRIES_BEFORE_CRAFT_CANCEL  = 30
 local CRAFT_CANCEL_SETTLE_SECONDS  = 2
 local PLASMA_WATCH_POLL_SECONDS     = 1
-local PLASMA_CLEAR_STABLE_POLLS     = 3
 
 ------------------------------------------------
 -- ME
@@ -484,9 +485,9 @@ end
 ------------------------------------------------
 -- PLASMA FLUID CHECK
 ------------------------------------------------
-local function getPlasmaFluids()
+local function getPlasmaFluids(fluids)
   local plasmaFluids = {}
-  local fluids = storageME.getFluidsInNetwork()
+  fluids = fluids or storageME.getFluidsInNetwork()
   for _, stack in ipairs(fluids) do
     local label = stack.label or ""
     if label:find("Plasma") then
@@ -510,6 +511,8 @@ end
 -- WAIT FOR REQUESTED WORK
 -- Retry every unseen plasma job on a fixed interval.
 -- AE's reported job state is logged but does not block a retry.
+-- A new dust/non-plasma-fluid batch is authoritative proof that the
+-- Exoticizer accepted the previous plasmas and advanced its recipe.
 ------------------------------------------------
 local function waitForRequestedWork(jobs)
   if #jobs == 0 then
@@ -518,13 +521,20 @@ local function waitForRequestedWork(jobs)
   end
 
   print("\nWatching requested plasma jobs...")
-  local stableClear = 0
   local elapsed = 0
   local alertAttempted = false
 
   while true do
-    local plasmaFluids = getPlasmaFluids()
-    local hasPlasma = #plasmaFluids > 0
+    local currentItems = storageME.getItemsInNetwork()
+    local currentFluids = storageME.getFluidsInNetwork()
+    local _, hasNextBatch = getInputSignature(currentItems, currentFluids)
+
+    if hasNextBatch then
+      print("Next Exoticizer input batch detected; previous recipe is complete.")
+      return true
+    end
+
+    local plasmaFluids = getPlasmaFluids(currentFluids)
 
     for _, job in ipairs(jobs) do
       local matched = false
@@ -550,14 +560,11 @@ local function waitForRequestedWork(jobs)
       end
     end
 
-    local allResolved = true
     for _, job in ipairs(jobs) do
       local state = getCraftingState(job.status)
       job.state = state
 
       if not job.seen then
-        allResolved = false
-
         if job.quietSeconds >= PLASMA_RETRY_SECONDS then
           print(string.format(
             "  WATCHDOG: no %s plasma detected for %d seconds (craft: %s)",
@@ -585,26 +592,6 @@ local function waitForRequestedWork(jobs)
           job.quietSeconds = 0
         end
       end
-    end
-
-    if allResolved then
-      if hasPlasma then
-        stableClear = 0
-      else
-        stableClear = stableClear + 1
-        print(string.format(
-          "  all jobs resolved; no plasma fluids seen (%d/%d)",
-          stableClear,
-          PLASMA_CLEAR_STABLE_POLLS
-        ))
-
-        if stableClear >= PLASMA_CLEAR_STABLE_POLLS then
-          print("Plasma fluid activity appears finished.")
-          return true
-        end
-      end
-    else
-      stableClear = 0
     end
 
     if not alertAttempted and elapsed >= PLASMA_CRAFT_ALERT_SECONDS then
