@@ -6,7 +6,6 @@ local component = require("component")
 local PULSE_SIDE   = 0
 
 local IDLE_POLL_SECONDS = 1
-local INPUT_STABLE_SECONDS = 5
 local FLUSH_POLL_SECONDS = 1
 local FLUSH_CLEAR_STABLE_POLLS = 2
 local FLUSH_ALERT_SECONDS = 60
@@ -309,8 +308,8 @@ end
 
 ------------------------------------------------
 -- AUTOMATIC INPUT DETECTION
--- A batch is ready after its dust/non-plasma fluid contents
--- remain unchanged for INPUT_STABLE_SECONDS.
+-- The Exoticizer deposits its complete input batch instantly, so the
+-- first snapshot containing dust or non-plasma fluid is accepted.
 ------------------------------------------------
 local function getInputSignature(items, fluids)
   local amounts = {}
@@ -474,40 +473,17 @@ local function flushInputs()
   print("  Recipe inputs are clear; flush output turned off.")
 end
 
-local function waitForStableInputSnapshot()
+local function waitForInputSnapshot()
   print("Watching storage ME for a new Exoticizer input batch...")
-
-  local previousSignature = nil
-  local stableSeconds = 0
 
   while true do
     local items = storageME.getItemsInNetwork()
     local fluids = storageME.getFluidsInNetwork()
-    local signature, hasInputs = getInputSignature(items, fluids)
+    local _, hasInputs = getInputSignature(items, fluids)
 
-    if not hasInputs then
-      previousSignature = nil
-      stableSeconds = 0
-    elseif signature ~= previousSignature then
-      if previousSignature then
-        print(string.format(
-          "  Input batch changed; restarting the %d-second settle timer.",
-          INPUT_STABLE_SECONDS
-        ))
-      else
-        print("  Input batch detected; waiting for deposits to finish.")
-      end
-      previousSignature = signature
-      stableSeconds = 0
-    else
-      stableSeconds = stableSeconds + IDLE_POLL_SECONDS
-      if stableSeconds >= INPUT_STABLE_SECONDS then
-        print(string.format(
-          "  Input batch unchanged for %d seconds; snapshot accepted.",
-          INPUT_STABLE_SECONDS
-        ))
-        return items, fluids
-      end
+    if hasInputs then
+      print("  Input batch detected; snapshot accepted immediately.")
+      return items, fluids
     end
 
     os.sleep(IDLE_POLL_SECONDS)
@@ -793,7 +769,7 @@ print("Automatic mode enabled; no input trigger is required.")
 
 while true do
   waitForClean()
-  local items, fluids = waitForStableInputSnapshot()
+  local items, fluids = waitForInputSnapshot()
 
   local ok, err = pcall(runCycle, items, fluids)
   if not ok then
