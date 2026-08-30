@@ -602,15 +602,15 @@ local function waitForRequestedWork(jobs)
       end
     else
       stableClear = 0
+    end
 
-      if not alertAttempted and elapsed >= PLASMA_CRAFT_ALERT_SECONDS then
-        alertAttempted = true
-        print(string.format(
-          "  Plasma crafting still has unresolved jobs after %d seconds; sending Discord alert.",
-          PLASMA_CRAFT_ALERT_SECONDS
-        ))
-        sendDiscordAlert()
-      end
+    if not alertAttempted and elapsed >= PLASMA_CRAFT_ALERT_SECONDS then
+      alertAttempted = true
+      print(string.format(
+        "  Plasma crafting/watch stage has exceeded %d seconds; sending Discord alert.",
+        PLASMA_CRAFT_ALERT_SECONDS
+      ))
+      sendDiscordAlert()
     end
 
     os.sleep(PLASMA_WATCH_POLL_SECONDS)
