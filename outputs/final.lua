@@ -1,6 +1,7 @@
 local component = require("component")
-local SCRIPT_VERSION = "1.2.0"
-local SCRIPT_VERSION_REASON = "Use the next Exoticizer input batch as the recipe-completion signal"
+local computer = require("computer")
+local SCRIPT_VERSION = "1.3.0"
+local SCRIPT_VERSION_REASON = "Pause new cycles around the scheduled 4 AM and 4 PM server restarts"
 
 print("Heliofusion Exoticizer automation v" .. SCRIPT_VERSION)
 print("Version reason: " .. SCRIPT_VERSION_REASON)
@@ -22,6 +23,16 @@ local PLASMA_CRAFT_ALERT_SECONDS    = 60
 local RETRIES_BEFORE_CRAFT_CANCEL  = 30
 local CRAFT_CANCEL_SETTLE_SECONDS  = 2
 local PLASMA_WATCH_POLL_SECONDS     = 1
+
+local RESTART_PAUSE_ENABLED = true
+local RESTART_TIME_API_URL = "https://timeapi.io/api/time/current/zone?timeZone=America%2FNew_York"
+local RESTART_TIMEZONE_NAME = "America/New_York"
+-- These minutes repeat every 12 hours: 3:50-4:10 AM and PM.
+local RESTART_PAUSE_START_MINUTE = 3 * 60 + 50
+local RESTART_PAUSE_END_MINUTE = 4 * 60 + 10
+local RESTART_TIME_SYNC_SECONDS = 5 * 60
+local RESTART_TIME_RETRY_SECONDS = 60
+local RESTART_PAUSE_POLL_SECONDS = 30
 
 ------------------------------------------------
 -- ME
@@ -45,6 +56,150 @@ local FLUID_PLASMA_PER_CELL = 1000
 -- REDSTONE
 ------------------------------------------------
 local redstone = assert(component.redstone, "No redstone card found")
+
+------------------------------------------------
+-- SCHEDULED SERVER-RESTART PROTECTION
+-- OpenComputers os.time() follows Minecraft world time, so real Eastern
+-- time is synchronized through the Internet Card and advanced by uptime.
+------------------------------------------------
+local restartClockSeconds = nil
+local restartClockSyncUptime = nil
+local restartClockLastAttempt = -math.huge
+local restartClockWarningShown = false
+
+local function fetchRestartClock()
+  if not component.isAvailable("internet") then
+    return nil, "no Internet Card is available"
+  end
+
+  local internetOk, internetOrError = pcall(require, "internet")
+  if not internetOk then
+    return nil, tostring(internetOrError)
+  end
+
+  local requestOk, responseOrError = pcall(
+    internetOrError.request,
+    RESTART_TIME_API_URL,
+    nil,
+    { ["User-Agent"] = "OpenComputers-Heliofusion-Clock" },
+    "GET"
+  )
+  if not requestOk then
+    return nil, tostring(responseOrError)
+  end
+
+  local responseParts = {}
+  local responseOk, responseError = pcall(function()
+    for chunk in responseOrError do
+      responseParts[#responseParts + 1] = chunk
+    end
+  end)
+  if not responseOk then
+    return nil, tostring(responseError)
+  end
+
+  local response = table.concat(responseParts)
+  local hour = response:match('"hour"%s*:%s*(%d+)')
+  local minute = response:match('"minute"%s*:%s*(%d+)')
+  local second = response:match('"seconds"%s*:%s*(%d+)')
+  if not hour or not minute or not second then
+    return nil, "time service response did not contain a usable datetime"
+  end
+
+  return tonumber(hour) * 3600 + tonumber(minute) * 60 + tonumber(second)
+end
+
+local function getRestartClock(forceSync)
+  if not RESTART_PAUSE_ENABLED then
+    return nil, "restart pause is disabled"
+  end
+
+  local uptime = computer.uptime()
+  local needsSync = forceSync
+      or restartClockSeconds == nil
+      or uptime - restartClockSyncUptime >= RESTART_TIME_SYNC_SECONDS
+  local retryReady = forceSync
+      or uptime - restartClockLastAttempt >= RESTART_TIME_RETRY_SECONDS
+  local syncError = nil
+
+  if needsSync and retryReady then
+    restartClockLastAttempt = uptime
+    local synchronizedSeconds, fetchError = fetchRestartClock()
+    if synchronizedSeconds then
+      restartClockSeconds = synchronizedSeconds
+      restartClockSyncUptime = uptime
+      restartClockWarningShown = false
+    else
+      syncError = fetchError
+    end
+  end
+
+  if restartClockSeconds == nil then
+    return nil, syncError or "wall clock has not synchronized"
+  end
+
+  local elapsed = math.max(0, uptime - restartClockSyncUptime)
+  return (restartClockSeconds + math.floor(elapsed)) % 86400, syncError
+end
+
+local function formatRestartClock(seconds)
+  local hour24 = math.floor(seconds / 3600)
+  local minute = math.floor(seconds / 60) % 60
+  local second = seconds % 60
+  local suffix = hour24 >= 12 and "PM" or "AM"
+  local hour12 = hour24 % 12
+  if hour12 == 0 then
+    hour12 = 12
+  end
+  return string.format("%d:%02d:%02d %s", hour12, minute, second, suffix)
+end
+
+local function isRestartPauseTime(seconds)
+  local minuteOfHalfDay = math.floor(seconds / 60) % (12 * 60)
+  return minuteOfHalfDay >= RESTART_PAUSE_START_MINUTE
+      and minuteOfHalfDay < RESTART_PAUSE_END_MINUTE
+end
+
+local function waitForRestartPause()
+  if not RESTART_PAUSE_ENABLED then
+    return
+  end
+
+  local seconds, clockError = getRestartClock(false)
+  if not seconds then
+    if not restartClockWarningShown then
+      restartClockWarningShown = true
+      print("Restart protection unavailable: " .. tostring(clockError))
+    end
+    return
+  end
+
+  if not isRestartPauseTime(seconds) then
+    return
+  end
+
+  redstone.setOutput(PULSE_SIDE, 0)
+  print(string.format(
+    "Scheduled restart protection active at %s %s; pausing new cycles until after 4:10.",
+    formatRestartClock(seconds),
+    RESTART_TIMEZONE_NAME
+  ))
+
+  while isRestartPauseTime(seconds) do
+    os.sleep(RESTART_PAUSE_POLL_SECONDS)
+    local updatedSeconds = getRestartClock(false)
+    if updatedSeconds then
+      seconds = updatedSeconds
+    else
+      seconds = (seconds + RESTART_PAUSE_POLL_SECONDS) % 86400
+    end
+  end
+
+  print(string.format(
+    "Scheduled restart window ended at %s; resuming automation.",
+    formatRestartClock(seconds)
+  ))
+end
 
 ------------------------------------------------
 -- LOAD STORE
@@ -300,6 +455,7 @@ end
 local function waitForClean()
   print("Waiting for leftover plasma cells...")
   while true do
+    waitForRestartPause()
     local hasCells, label, amount = meHasPlasmaCells()
     if not hasCells then
       print("ME is clear of leftover plasma cells.")
@@ -469,6 +625,7 @@ local function waitForInputSnapshot()
   print("Watching storage ME for a new Exoticizer input batch...")
 
   while true do
+    waitForRestartPause()
     local items = storageME.getItemsInNetwork()
     local fluids = storageME.getFluidsInNetwork()
     local _, hasInputs = getInputSignature(items, fluids)
@@ -769,9 +926,26 @@ else
   ))
 end
 
+if RESTART_PAUSE_ENABLED then
+  local restartSeconds, restartClockError = getRestartClock(true)
+  if restartSeconds then
+    print(string.format(
+      "Restart protection: ready at %s %s (pause 3:50-4:10 AM/PM)",
+      formatRestartClock(restartSeconds),
+      RESTART_TIMEZONE_NAME
+    ))
+  else
+    print("Restart protection: CLOCK ERROR - " .. tostring(restartClockError))
+  end
+else
+  print("Restart protection: disabled")
+end
+
 while true do
+  waitForRestartPause()
   waitForClean()
   local items, fluids = waitForInputSnapshot()
+  waitForRestartPause()
 
   local ok, err = pcall(runCycle, items, fluids)
   if not ok then
